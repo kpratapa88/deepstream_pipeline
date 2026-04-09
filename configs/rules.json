@@ -1,0 +1,193 @@
+{
+    "stream_template": {
+        "_comment": "Default config applied to streams not explicitly defined (stream 11, 12, ...)",
+        "models": [
+            {"name": "coco", "detect": ["person"]}
+        ]
+    },
+
+    "models": {        "coco": {
+            "config":  "configs/config_infer_primary_yolov11.txt",
+            "engine":  "yolo11n",
+            "gie_id":  1,
+            "classes": {
+                "person":   {"class_id": 0,  "confidence_threshold": 0.4},
+                "bird":     {"class_id": 14, "confidence_threshold": 0.3},
+                "cat":      {"class_id": 15, "confidence_threshold": 0.3},
+                "dog":      {"class_id": 16, "confidence_threshold": 0.3},
+                "horse":    {"class_id": 17, "confidence_threshold": 0.3},
+                "sheep":    {"class_id": 18, "confidence_threshold": 0.3},
+                "cow":      {"class_id": 19, "confidence_threshold": 0.3},
+                "elephant": {"class_id": 20, "confidence_threshold": 0.3},
+                "bear":     {"class_id": 21, "confidence_threshold": 0.3},
+                "zebra":    {"class_id": 22, "confidence_threshold": 0.3},
+                "giraffe":  {"class_id": 23, "confidence_threshold": 0.3}
+            }
+        },
+        "fire_smoke": {
+            "config":  "configs/config_infer_fire_smoke.txt",
+            "engine":  "fire_smoke",
+            "gie_id":  2,
+            "classes": {
+                "fire":  {"class_id": 0, "confidence_threshold": 0.3},
+                "smoke": {"class_id": 1, "confidence_threshold": 0.3}
+            }
+        },
+        "pose": {
+            "config":  "configs/config_infer_pose.txt",
+            "engine":  "yolo11n-pose",
+            "gie_id":  4,
+            "classes": {}
+        }
+    },
+
+    "stream_configs": {
+
+        "0": {
+            "id":       "CAM_01",
+            "location": "Main_Entrance",
+            "models": [
+                {
+                    "name":     "coco",
+                    "detect":   ["person"],
+                    "features": ["fall_detection"]
+                }
+            ],
+            "description": "Entrance monitoring — person detection with fall alert"
+        },
+
+        "1": {
+            "id":       "CAM_02",
+            "location": "Barn_West",
+            "models": [
+                {
+                    "name":   "coco",
+                    "detect": ["cow", "horse", "sheep", "dog", "cat"]
+                }
+            ],
+            "description": "Livestock monitoring — animal detection only"
+        },
+
+        "2": {
+            "id":       "CAM_03",
+            "location": "Factory_Floor",
+            "models": [
+                {
+                    "name":   "fire_smoke",
+                    "detect": ["fire", "smoke"]
+                }
+            ],
+            "description": "Industrial safety — fire and smoke detection only"
+        },
+
+        "3": {
+            "id":       "CAM_04",
+            "location": "Main_Hall",
+            "models": [
+                {
+                    "name":     "coco",
+                    "detect":   ["person"],
+                    "features": ["crowd_density"]
+                }
+            ],
+            "crowd": {"low": 3, "medium": 8, "high": 15, "critical": 25},
+            "description": "Crowd management — person count and density zones"
+        },
+
+        "4": {
+            "id":       "CAM_05",
+            "location": "Warehouse",
+            "models": [
+                {
+                    "name":     "coco",
+                    "detect":   ["person"],
+                    "features": ["fall_detection"]
+                },
+                {
+                    "name":   "fire_smoke",
+                    "detect": ["fire", "smoke"]
+                }
+            ],
+            "description": "Warehouse safety — person fall detection AND fire/smoke simultaneously"
+        },
+
+        "5": {
+            "id":       "CAM_06",
+            "location": "Barn_East",
+            "models": [
+                {
+                    "name":   "coco",
+                    "detect": ["cow", "horse", "sheep", "elephant", "giraffe", "zebra", "bear"]
+                },
+                {
+                    "name":   "fire_smoke",
+                    "detect": ["fire"]
+                }
+            ],
+            "description": "Farm perimeter — large animal detection AND fire alert"
+        },
+
+        "6": {
+            "id":       "CAM_07",
+            "location": "Server_Room",
+            "models": [
+                {
+                    "name":   "fire_smoke",
+                    "detect": ["fire", "smoke"]
+                },
+                {
+                    "name":   "coco",
+                    "detect": ["person"]
+                }
+            ],
+            "description": "Server room — fire/smoke primary, unauthorized person secondary"
+        },
+
+        "7": {
+            "id":       "CAM_08",
+            "location": "Lobby",
+            "models": [
+                {
+                    "name":     "coco",
+                    "detect":   ["person"],
+                    "features": ["crowd_density", "fall_detection"]
+                }
+            ],
+            "crowd": {"low": 5, "medium": 15, "high": 30, "critical": 50},
+            "description": "Lobby — crowd density AND fall detection combined on same stream"
+        },
+
+        "8": {
+            "id":       "CAM_09",
+            "location": "Outdoor_Pen",
+            "models": [
+                {
+                    "name":   "coco",
+                    "detect": ["dog", "cat", "bird", "sheep", "cow"]
+                }
+            ],
+            "description": "Outdoor animal pen — small and medium animal detection"
+        },
+
+        "9": {
+            "id":       "CAM_10",
+            "location": "Loading_Dock",
+            "models": [
+                {
+                    "name":     "coco",
+                    "detect":   ["person"],
+                    "features": ["fall_detection"]
+                },
+                {
+                    "name":   "fire_smoke",
+                    "detect": ["fire", "smoke"]
+                },
+                {
+                    "name":   "coco",
+                    "detect": ["dog"]
+                }
+            ],
+            "description": "Loading dock — full coverage: person fall, fire/smoke, guard dog detection"
+        }
+    }
+}

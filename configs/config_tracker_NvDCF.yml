@@ -1,0 +1,36 @@
+%YAML:1.0
+################################################################################
+# Copyright (c) 2021, NVIDIA CORPORATION. All rights reserved.
+#
+# NVIDIA Corporation and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto. Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA Corporation is strictly prohibited.
+################################################################################
+
+NvDCF:
+  # [General]
+  useColorNames: 1
+  useHog: 1
+  useSimpleHog: 0
+  # [Filter]
+  # 0: correlation filter (CF)
+  # 1: discriminatory CF (DCF)
+  # 2: modified DCF (MDCF)
+  filterType: 1
+  # [Association]
+  # min score for association
+  minScore: 0.2
+  # [Termination]
+  # number of frames to keep track alive without detection
+  maxShadowTrackingAge: 30
+  # [Visual Confirmation]
+  # number of frames to confirm a track
+  minConfirmationAge: 1
+  # [Miscellaneous]
+  # 0: IOU, 1: DCF score
+  matchingScoreType: 1
+  # [Output]
+  # 0: bbox from detector, 1: bbox from tracker
+  outputBboxType: 0

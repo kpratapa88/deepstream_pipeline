@@ -1,0 +1,38 @@
+# Model files — too large for git, build with setup.sh
+models/*.engine
+models/*.onnx
+models/*.pt
+
+# Output videos
+output/*.mp4
+output/*.avi
+*.mp4
+*.avi
+
+# Input videos
+videos/*.mp4
+videos/*.avi
+videos/*.mkv
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Temp nvinfer config files (generated at runtime)
+configs/tmp*.txt
+
+# Unused submodule
+DeepStream-Yolo/
+
+# Empty unused directories
+postprocess/
+tests/
+
+# Logs
+*.log

@@ -1,0 +1,19 @@
+[property]
+gpu-id=0
+net-scale-factor=0.0039215697906911373
+model-color-format=0
+onnx-file=../models/yolo11n.onnx
+# model-engine-file is set dynamically by the pipeline as yolo11n_b{N}.engine
+# batch-size is set dynamically by the pipeline based on --streams argument
+infer-dims=3;640;640
+network-mode=2
+num-detected-classes=80
+interval=0
+gie-unique-id=1
+process-mode=1
+network-type=100
+output-tensor-meta=1
+output-blob-names=output0
+cluster-mode=4
+maintain-aspect-ratio=1
+symmetric-padding=1
