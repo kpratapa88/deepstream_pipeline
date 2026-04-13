@@ -1,0 +1,115 @@
+# Kafka + Zookeeper stack — WSL2 + Docker compatible.
+#
+# Three listeners solve the WSL2 networking problem:
+#
+#   INTERNAL      kafka:29092       container-to-container (DeepStream → Kafka)
+#   LOCALHOST     localhost:9092    WSL host process → Kafka (kafka_consumer.py)
+#   DOCKER_HOST   172.17.0.1:9093  DeepStream container → Kafka via Docker bridge
+#
+# Usage:
+#   docker compose -f docker-compose.kafka.yml up -d
+#   docker compose -f docker-compose.kafka.yml down -v   # destroy + wipe data
+
+version: "3.9"
+
+networks:
+  ds-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+
+services:
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    container_name: ds-zookeeper
+    restart: unless-stopped
+    networks:
+      - ds-net
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME:   2000
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+      - zookeeper-log:/var/lib/zookeeper/log
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo ruok | nc localhost 2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: ds-kafka
+    restart: unless-stopped
+    networks:
+      - ds-net
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"    # WSL host access
+      - "9093:9093"    # Docker bridge / DeepStream container access
+    environment:
+      KAFKA_BROKER_ID:    1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+
+      # Three listeners — one per access path
+      KAFKA_LISTENERS: >-
+        INTERNAL://0.0.0.0:29092,
+        LOCALHOST://0.0.0.0:9092,
+        DOCKER_HOST://0.0.0.0:9093
+
+      # Advertised addresses — what clients are told to reconnect to
+      # INTERNAL  : used by containers on ds-net (e.g. kafka-ui)
+      # LOCALHOST : used by WSL host processes (kafka_consumer.py)
+      # DOCKER_HOST: used by DeepStream container via Docker bridge IP
+      KAFKA_ADVERTISED_LISTENERS: >-
+        INTERNAL://kafka:29092,
+        LOCALHOST://localhost:9092,
+        DOCKER_HOST://172.17.0.1:9093
+
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: >-
+        INTERNAL:PLAINTEXT,
+        LOCALHOST:PLAINTEXT,
+        DOCKER_HOST:PLAINTEXT
+
+      KAFKA_INTER_BROKER_LISTENER_NAME:       INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE:        "true"
+      KAFKA_LOG_RETENTION_HOURS:              24
+      KAFKA_LOG_SEGMENT_BYTES:                104857600   # 100 MB
+      KAFKA_LOG_RETENTION_BYTES:              1073741824  # 1 GB per topic
+      KAFKA_MESSAGE_MAX_BYTES:                1048576     # 1 MB max message
+      KAFKA_COMPRESSION_TYPE:                 lz4
+      KAFKA_NUM_PARTITIONS:                   4
+      KAFKA_DEFAULT_REPLICATION_FACTOR:       1
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: ds-kafka-ui
+    restart: unless-stopped
+    networks:
+      - ds-net
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME:             local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_ZOOKEEPER:        zookeeper:2181
+
+volumes:
+  zookeeper-data:
+  zookeeper-log:
+  kafka-data:

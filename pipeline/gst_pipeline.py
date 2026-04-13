@@ -31,6 +31,7 @@ from .fall_detector import FallDetector
 from .crowd_monitor import CrowdMonitor
 from .event_emitter import EventEmitter
 from .probe_handler import ProbeHandler
+from .kafka_producer import KafkaEventProducer, ensure_topics
 
 
 def _patch_config(base_path: str, engine_name: str, batch: int,
@@ -102,7 +103,8 @@ class DeepStreamPipeline:
                  output_file: str = None,
                  infer_interval: int = 2,
                  rules_file: str = None,
-                 stream_overrides: dict = None):
+                 stream_overrides: dict = None,
+                 kafka_producer: "KafkaEventProducer" = None):
         self.sources        = sources
         self.output_file    = output_file
         self.infer_interval = infer_interval
@@ -124,7 +126,11 @@ class DeepStreamPipeline:
         self.dashboard     = ConsoleDashboard(num_streams=len(sources))
         self.fall_detector = FallDetector()
         self.crowd_monitor = CrowdMonitor()
-        self.event_emitter = EventEmitter(self.dashboard, self.rule_engine)
+        self.kafka         = kafka_producer
+        self.event_emitter = EventEmitter(
+            self.dashboard, self.rule_engine,
+            kafka_producer=kafka_producer,
+        )
 
         # Benchmark state
         self._bm = defaultdict(lambda: {
@@ -161,6 +167,8 @@ class DeepStreamPipeline:
         elapsed = now - self._bm_start
         if elapsed >= BENCHMARK_INTERVAL_SEC:
             print_benchmark(dict(self._bm), elapsed)
+            if self.kafka:
+                self.kafka.publish_benchmark(dict(self._bm), elapsed)
             for s in self._bm.values():
                 s["frames"] = s["detections"] = s["infer_calls"] = 0
                 s["infer_ms_total"] = 0.0
@@ -389,6 +397,8 @@ class DeepStreamPipeline:
             print_benchmark(dict(self._bm), elapsed)
             if self._probe_handler:
                 self._probe_handler.shutdown()
+            if self.kafka:
+                self.kafka.shutdown()
             self.pipeline.set_state(Gst.State.NULL)
             for tmp in tmp_configs.values():
                 try:

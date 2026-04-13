@@ -112,7 +112,8 @@ RUN pip3 install \
 # Utilities
 RUN pip3 install \
     pyyaml \
-    requests
+    requests \
+    confluent-kafka
 
 # ── Working directory & application ──────────────────────────────────────────
 WORKDIR /app
