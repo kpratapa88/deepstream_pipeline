@@ -109,6 +109,10 @@ def parse_args() -> argparse.Namespace:
         metavar="PATH",
         help="Path to CA certificate file for TLS verification",
     )
+    parser.add_argument(
+        "--kafka-detections", action="store_true", default=False,
+        help="Also publish every raw detection to ds.detections (high volume — off by default)",
+    )
 
     return parser.parse_args()
 
@@ -168,6 +172,7 @@ def build_kafka_producer(args) -> "KafkaEventProducer | None":
         sasl_password       = args.kafka_sasl_password or None,
         ssl_ca_location     = args.kafka_ssl_ca or None,
         enabled             = True,
+        publish_detections  = args.kafka_detections,
     )
 
 

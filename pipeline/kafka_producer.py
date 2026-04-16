@@ -1,15 +1,16 @@
 """
 Enterprise Kafka producer for the DeepStream pipeline.
 
-Features:
-- Async, non-blocking — uses a background thread queue so GStreamer probes
-  are never stalled waiting for network I/O.
-- Guaranteed delivery — producer is configured with acks=all and retries.
-- Schema-versioned JSON messages with envelope metadata.
-- Per-topic routing: detections → ds.detections, alerts → ds.alerts,
-  heartbeat → ds.heartbeat, benchmark → ds.benchmark.
+Design principles:
+- Async, non-blocking — background thread queue so GStreamer probes never stall.
+- Hostname and server metadata cached at init — no syscalls per message.
+- ds.detections is opt-in (--kafka-detections flag) — disabled by default
+  because it generates hundreds of messages/sec and is the main cause of
+  pipeline slowdown when Kafka is enabled.
+- ds.alerts, ds.heartbeat, ds.benchmark are always published (low rate).
+- Guaranteed delivery: acks=all, idempotent producer, LZ4 compression.
 - Graceful shutdown with queue drain.
-- Falls back to console-only mode when Kafka is unavailable (POC-safe).
+- Falls back to console-only when confluent_kafka is not installed.
 """
 
 import json
@@ -38,24 +39,7 @@ TOPIC_BENCHMARK  = "ds.benchmark"
 
 ALL_TOPICS = [TOPIC_DETECTIONS, TOPIC_ALERTS, TOPIC_HEARTBEAT, TOPIC_BENCHMARK]
 
-# ── Schema version — bump when message structure changes ─────────────────────
 SCHEMA_VERSION = "1.0"
-
-
-def _build_envelope(event_type: str, payload: dict,
-                    server_id: str, gpu_id: int) -> dict:
-    """Wrap a payload in a standard envelope for all topics."""
-    return {
-        "schema_version": SCHEMA_VERSION,
-        "message_id":     str(uuid.uuid4()),
-        "event_type":     event_type,
-        "server_id":      server_id,
-        "gpu_id":         gpu_id,
-        "hostname":       socket.gethostname(),
-        "timestamp_utc":  time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "timestamp_ms":   int(time.time() * 1000),
-        "payload":        payload,
-    }
 
 
 class KafkaEventProducer:
@@ -65,14 +49,11 @@ class KafkaEventProducer:
     All publish calls enqueue a message and return immediately.
     A single background thread drains the queue and calls confluent_kafka
     Producer.produce() + poll().
-
-    If Kafka is not reachable or confluent_kafka is not installed,
-    the producer silently no-ops so the pipeline continues running.
     """
 
-    _QUEUE_MAX  = 10_000   # drop oldest if queue fills (back-pressure)
-    _POLL_MS    = 50        # producer poll interval in background thread
-    _DRAIN_WAIT = 5.0       # seconds to wait for queue drain on shutdown
+    _QUEUE_MAX  = 10_000
+    _POLL_MS    = 50
+    _DRAIN_WAIT = 5.0
 
     def __init__(
         self,
@@ -85,10 +66,12 @@ class KafkaEventProducer:
         sasl_password: Optional[str] = None,
         ssl_ca_location: Optional[str] = None,
         enabled: bool = True,
+        publish_detections: bool = False,   # opt-in — high volume, off by default
     ):
-        self.server_id = server_id
-        self.gpu_id    = gpu_id
-        self.enabled   = enabled and _KAFKA_AVAILABLE
+        self.server_id          = server_id
+        self.gpu_id             = gpu_id
+        self.enabled            = enabled and _KAFKA_AVAILABLE
+        self.publish_detections = publish_detections
 
         self._producer: Optional[object] = None
         self._queue    = queue.Queue(maxsize=self._QUEUE_MAX)
@@ -96,47 +79,49 @@ class KafkaEventProducer:
         self._running  = False
         self._dropped  = 0
 
+        # Cache these once — avoid syscalls inside _build_envelope
+        self._hostname = socket.gethostname()
+
         if not self.enabled:
             reason = "confluent_kafka not installed" if not _KAFKA_AVAILABLE else "disabled by config"
             print(f"{C['yellow']}[Kafka] producer disabled ({reason}) — console-only mode{C['reset']}")
             return
 
-        # ── Build confluent_kafka config ──────────────────────────────────────
         conf = {
-            "bootstrap.servers":            bootstrap_servers,
-            "acks":                         "all",           # strongest durability
-            "retries":                      5,
-            "retry.backoff.ms":             500,
-            "linger.ms":                    10,              # micro-batching
-            "batch.size":                   65536,
-            "compression.type":             "lz4",
-            "enable.idempotence":           True,            # exactly-once producer
+            "bootstrap.servers":                     bootstrap_servers,
+            "acks":                                  "all",
+            "retries":                               5,
+            "retry.backoff.ms":                      500,
+            "linger.ms":                             20,       # slightly larger batch window
+            "batch.size":                            65536,
+            "compression.type":                      "lz4",
+            "enable.idempotence":                    True,
             "max.in.flight.requests.per.connection": 5,
-            "delivery.timeout.ms":          30000,
-            "socket.keepalive.enable":      True,
-            "client.id":                    f"ds-pipeline-{server_id}-gpu{gpu_id}",
+            "delivery.timeout.ms":                   30000,
+            "socket.keepalive.enable":               True,
+            "queue.buffering.max.messages":          100000,
+            "client.id":                             f"ds-pipeline-{server_id}-gpu{gpu_id}",
         }
 
-        # ── TLS / SASL (enterprise auth) ──────────────────────────────────────
         if security_protocol != "PLAINTEXT":
             conf["security.protocol"] = security_protocol
         if sasl_mechanism:
-            conf["sasl.mechanism"]  = sasl_mechanism
-            conf["sasl.username"]   = sasl_username or ""
-            conf["sasl.password"]   = sasl_password or ""
+            conf["sasl.mechanism"] = sasl_mechanism
+            conf["sasl.username"]  = sasl_username or ""
+            conf["sasl.password"]  = sasl_password or ""
         if ssl_ca_location:
             conf["ssl.ca.location"] = ssl_ca_location
 
         try:
             self._producer = Producer(conf)
+            det_note = "detections ON" if publish_detections else "detections OFF (alerts only)"
             print(f"{C['green']}[Kafka] producer connected → {bootstrap_servers} "
-                  f"(server={server_id}, gpu={gpu_id}){C['reset']}")
+                  f"(server={server_id}, gpu={gpu_id}, {det_note}){C['reset']}")
         except KafkaException as e:
             print(f"{C['red']}[Kafka] producer init failed: {e} — console-only mode{C['reset']}")
             self.enabled = False
             return
 
-        # ── Start background delivery thread ──────────────────────────────────
         self._running = True
         self._thread  = threading.Thread(
             target=self._delivery_loop,
@@ -150,7 +135,9 @@ class KafkaEventProducer:
     def publish_detection(self, stream_id: int, cam_id: str, location: str,
                           model: str, class_name: str, confidence: float,
                           bbox: dict) -> None:
-        """Publish a raw detection event to ds.detections."""
+        """Publish to ds.detections — only active when publish_detections=True."""
+        if not self.publish_detections:
+            return
         payload = {
             "stream_id":  stream_id,
             "cam_id":     cam_id,
@@ -158,19 +145,19 @@ class KafkaEventProducer:
             "model":      model,
             "class_name": class_name,
             "confidence": round(confidence, 4),
-            "bbox":       bbox,   # {x1, y1, x2, y2, w, h}
+            "bbox":       bbox,
         }
         self._enqueue(TOPIC_DETECTIONS, "detection", payload,
                       key=f"{cam_id}:{stream_id}")
 
     def publish_alert(self, stream_id: int, cam_id: str, location: str,
                       alert_type: str, confidence: float, details: dict) -> None:
-        """Publish a high-priority alert to ds.alerts."""
+        """Publish a deduplicated alert to ds.alerts."""
         payload = {
             "stream_id":  stream_id,
             "cam_id":     cam_id,
             "location":   location,
-            "alert_type": alert_type,   # fall | fire | smoke | crowd
+            "alert_type": alert_type,
             "confidence": round(confidence, 4),
             "details":    details,
         }
@@ -179,15 +166,14 @@ class KafkaEventProducer:
 
     def publish_heartbeat(self, streams_active: int, fps_total: float,
                           gpu_util_pct: float, vram_used_mb: float) -> None:
-        """Publish a periodic heartbeat to ds.heartbeat."""
+        """Publish periodic heartbeat to ds.heartbeat."""
         payload = {
             "streams_active": streams_active,
             "fps_total":      round(fps_total, 2),
             "gpu_util_pct":   round(gpu_util_pct, 1) if gpu_util_pct is not None else None,
             "vram_used_mb":   round(vram_used_mb, 1) if vram_used_mb is not None else None,
         }
-        self._enqueue(TOPIC_HEARTBEAT, "heartbeat", payload,
-                      key=self.server_id)
+        self._enqueue(TOPIC_HEARTBEAT, "heartbeat", payload, key=self.server_id)
 
     def publish_benchmark(self, stats: dict, elapsed: float) -> None:
         """Publish benchmark stats to ds.benchmark."""
@@ -201,26 +187,38 @@ class KafkaEventProducer:
                 "detections":   s["detections"],
                 "frames":       s["frames"],
             }
-        payload = {
-            "window_sec": round(elapsed, 2),
-            "streams":    per_stream,
-        }
-        self._enqueue(TOPIC_BENCHMARK, "benchmark", payload,
+        self._enqueue(TOPIC_BENCHMARK, "benchmark",
+                      {"window_sec": round(elapsed, 2), "streams": per_stream},
                       key=self.server_id)
 
-    # ── Internal helpers ──────────────────────────────────────────────────────
+    # ── Internal ──────────────────────────────────────────────────────────────
+
+    def _build_envelope(self, event_type: str, payload: dict) -> dict:
+        """Build message envelope — uses cached hostname, minimal allocations."""
+        now = time.time()
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "message_id":     str(uuid.uuid4()),
+            "event_type":     event_type,
+            "server_id":      self.server_id,
+            "gpu_id":         self.gpu_id,
+            "hostname":       self._hostname,          # cached at init
+            "timestamp_utc":  time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+            "timestamp_ms":   int(now * 1000),
+            "payload":        payload,
+        }
 
     def _enqueue(self, topic: str, event_type: str,
                  payload: dict, key: str = "") -> None:
         if not self.enabled or self._producer is None:
             return
-        msg = _build_envelope(event_type, payload, self.server_id, self.gpu_id)
+        msg = self._build_envelope(event_type, payload)
         try:
             self._queue.put_nowait((topic, key, msg))
         except queue.Full:
             self._dropped += 1
-            if self._dropped % 100 == 1:
-                print(f"{C['yellow']}[Kafka] queue full — dropped {self._dropped} messages{C['reset']}")
+            if self._dropped % 500 == 1:
+                print(f"{C['yellow']}[Kafka] queue full — dropped {self._dropped} msgs{C['reset']}")
 
     def _delivery_loop(self) -> None:
         """Background thread: drain queue → produce → poll."""
@@ -234,59 +232,57 @@ class KafkaEventProducer:
                     key=key.encode() if key else None,
                     on_delivery=self._on_delivery,
                 )
-                self._producer.poll(0)   # non-blocking poll
+                self._producer.poll(0)
             except queue.Empty:
                 self._producer.poll(self._POLL_MS / 1000)
             except KafkaException as e:
                 print(f"{C['red']}[Kafka] produce error: {e}{C['reset']}")
             except Exception as e:
-                print(f"{C['red']}[Kafka] unexpected error in delivery loop: {e}{C['reset']}")
+                print(f"{C['red']}[Kafka] delivery loop error: {e}{C['reset']}")
 
     @staticmethod
     def _on_delivery(err, msg) -> None:
         if err:
-            print(f"{C['red']}[Kafka] delivery failed: {err}{C['reset']}")
+            print(f"\033[91m[Kafka] delivery failed: {err}\033[0m")
 
     def flush(self, timeout: float = None) -> None:
-        """Block until all queued messages are delivered."""
         if self._producer:
             self._producer.flush(timeout or self._DRAIN_WAIT)
 
     def shutdown(self) -> None:
-        """Gracefully stop the background thread and flush remaining messages."""
         if not self.enabled:
             return
-        print(f"{C['dim']}[Kafka] shutting down producer (draining queue)...{C['reset']}")
+        print(f"{C['dim']}[Kafka] shutting down (draining queue)...{C['reset']}")
         self._running = False
         if self._thread:
             self._thread.join(timeout=self._DRAIN_WAIT)
         self.flush()
-        print(f"{C['dim']}[Kafka] producer shut down. dropped={self._dropped}{C['reset']}")
+        print(f"{C['dim']}[Kafka] shut down. dropped={self._dropped}{C['reset']}")
 
 
 def ensure_topics(bootstrap_servers: str,
                   num_partitions: int = 4,
                   replication_factor: int = 1) -> None:
-    """
-    Create Kafka topics if they don't already exist.
-    Call once at pipeline startup (idempotent).
-    """
+    """Create ds.* topics if they don't exist. Idempotent."""
     if not _KAFKA_AVAILABLE:
         return
-    admin = AdminClient({"bootstrap.servers": bootstrap_servers})
-    existing = set(admin.list_topics(timeout=5).topics.keys())
-    to_create = [
-        NewTopic(t, num_partitions=num_partitions,
-                 replication_factor=replication_factor)
-        for t in ALL_TOPICS if t not in existing
-    ]
-    if not to_create:
-        print(f"{C['dim']}[Kafka] all topics already exist{C['reset']}")
-        return
-    results = admin.create_topics(to_create)
-    for topic, fut in results.items():
-        try:
-            fut.result()
-            print(f"{C['green']}[Kafka] created topic: {topic}{C['reset']}")
-        except Exception as e:
-            print(f"{C['yellow']}[Kafka] topic '{topic}': {e}{C['reset']}")
+    try:
+        admin = AdminClient({"bootstrap.servers": bootstrap_servers})
+        existing = set(admin.list_topics(timeout=5).topics.keys())
+        to_create = [
+            NewTopic(t, num_partitions=num_partitions,
+                     replication_factor=replication_factor)
+            for t in ALL_TOPICS if t not in existing
+        ]
+        if not to_create:
+            print(f"{C['dim']}[Kafka] all topics already exist{C['reset']}")
+            return
+        results = admin.create_topics(to_create)
+        for topic, fut in results.items():
+            try:
+                fut.result()
+                print(f"{C['green']}[Kafka] created topic: {topic}{C['reset']}")
+            except Exception as e:
+                print(f"{C['yellow']}[Kafka] topic '{topic}': {e}{C['reset']}")
+    except Exception as e:
+        print(f"{C['yellow']}[Kafka] ensure_topics failed: {e}{C['reset']}")

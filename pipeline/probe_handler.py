@@ -33,12 +33,15 @@ class ProbeHandler:
         self._bm           = bm
 
         # Per-stream detection cache: {(stream_id, model_name): [dets]}
-        self._last_dets   = defaultdict(list)
+        self._last_dets    = defaultdict(list)
         # Per-stream fall windows: {stream_id: {bbox_key: deque}}
         self._fall_windows = defaultdict(dict)
+        # Frame counter for Kafka detection throttle
+        self._frame_count  = defaultdict(int)
 
-        # Async executor for console I/O only
-        self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="events")
+        # Async executor for event emission (console + Kafka alerts)
+        # 4 workers: enough headroom without competing with GStreamer threads
+        self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="events")
 
     def make_probe(self, model_name: str):
         """
@@ -104,11 +107,16 @@ class ProbeHandler:
                     self._last_dets[cache_key] = dets
 
                     if dets:
-                        self._executor.submit(
-                            self.event_emitter.emit,
-                            list(dets), stream_id, model_name,
-                            self.mux_w, self.mux_h, self.crowd_monitor
-                        )
+                        # Throttle executor submissions — emit every 3rd frame.
+                        # Alert deduplication inside emit() ensures alerts still
+                        # fire on time regardless of this throttle.
+                        self._frame_count[(stream_id, model_name)] += 1
+                        if self._frame_count[(stream_id, model_name)] % 3 == 0:
+                            self._executor.submit(
+                                self.event_emitter.emit,
+                                list(dets), stream_id, model_name,
+                                self.mux_w, self.mux_h, self.crowd_monitor
+                            )
 
                 # ── Inject OSD from cache every frame ─────────────────────────
                 cache_key   = (stream_id, model_name)
