@@ -68,10 +68,25 @@ class EventEmitter:
             if "crowd_density" in stream_info.features(model_key) and thresholds:
                 person_count = sum(1 for d in scaled if d["class_id"] == 0)
                 if person_count > 0:
-                    crowd_monitor.update(
+                    zone, zone_changed = crowd_monitor.update(
                         stream_id, person_count, thresholds,
                         self.dashboard, cam_id, location
                     )
+                    # Publish crowd alert to Kafka on zone change
+                    if zone_changed and self.kafka and zone != "CLEAR":
+                        avg = crowd_monitor.current_avg(stream_id)
+                        self.kafka.publish_alert(
+                            stream_id  = stream_id,
+                            cam_id     = cam_id,
+                            location   = location,
+                            alert_type = "crowd",
+                            confidence = min(1.0, person_count / max(thresholds.get("critical", 25), 1)),
+                            details    = {
+                                "zone":         zone,
+                                "person_count": person_count,
+                                "avg":          round(avg, 1),
+                            },
+                        )
 
         # ── Publish all detections to Kafka ds.detections ─────────────────────
         if self.kafka:
@@ -143,7 +158,47 @@ class EventEmitter:
                                 },
                             )
 
-        # ── Dashboard stats ───────────────────────────────────────────────────
+        # ── Animal / object detection alerts (non-person COCO classes) ─────────
+        if model_key == "coco":
+            # Alert on detection for notable classes (configurable per deployment)
+            _ALERT_CLASSES = {
+                0: "person",      # Person detection
+                15: "cat",        # Cat
+                16: "dog",        # Dog
+                17: "horse",      # Horse
+                18: "sheep",      # Sheep
+                19: "cow",        # Cow
+                20: "elephant",   # Elephant
+                21: "bear",       # Bear
+                22: "zebra",      # Zebra
+                23: "giraffe"     # Giraffe
+            }
+            
+            # Get allowed classes for this stream (from "detect" list in rules.json)
+            allowed_classes = stream_info.allowed_classes(model_key)
+            
+            for det in scaled:
+                cid = det["class_id"]
+                # Only create alert if:
+                # 1. Class is in the alert classes list
+                # 2. Class is in the stream's "detect" list (allowed_classes)
+                if cid in _ALERT_CLASSES and cid in allowed_classes:
+                    key = f"detection_{cid}_{stream_id}"
+                    if self._can_emit(stream_id, key):
+                        name = _ALERT_CLASSES[cid]
+                        self.dashboard.push_event(
+                            name, stream_id, cam_id, location,
+                            f"{name} conf={det['confidence']:.2f}"
+                        )
+                        if self.kafka:
+                            self.kafka.publish_alert(
+                                stream_id  = stream_id,
+                                cam_id     = cam_id,
+                                location   = location,
+                                alert_type = name,
+                                confidence = det["confidence"],
+                                details    = {"class_id": cid},
+                            )
         zone = crowd_monitor.current_zone(stream_id) if crowd_monitor else "CLEAR"
         self.dashboard.update_stream(
             stream_id, len(scaled), 0.0,

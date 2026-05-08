@@ -44,14 +44,52 @@ def pct_bar(pct, width: int = 20) -> str:
     return f"{color}{bar}{C['reset']} {pct:5.1f}%"
 
 
+def _read_cpu_pct() -> float:
+    """Read CPU usage from /proc/stat — works in any Linux container."""
+    try:
+        def _read():
+            with open("/proc/stat") as f:
+                line = f.readline()
+            vals = list(map(int, line.split()[1:]))
+            idle = vals[3]
+            total = sum(vals)
+            return idle, total
+
+        idle1, total1 = _read()
+        time.sleep(0.3)
+        idle2, total2 = _read()
+        idle_delta  = idle2  - idle1
+        total_delta = total2 - total1
+        if total_delta == 0:
+            return 0.0
+        return round((1.0 - idle_delta / total_delta) * 100.0, 1)
+    except Exception:
+        if _PSUTIL:
+            return psutil.cpu_percent(interval=0.3)
+        return 0.0
+
+
 def get_system_stats():
     """Returns (cpu_pct, ram_used_mb, ram_total_mb, gpu_pct, gpu_mem_used_mb, gpu_mem_total_mb)."""
-    cpu = ram_used = ram_total = gpu = gmem_used = gmem_total = None
+    cpu = _read_cpu_pct()
+    ram_used = ram_total = gpu = gmem_used = gmem_total = None
     if _PSUTIL:
-        cpu       = psutil.cpu_percent(interval=None)
         vm        = psutil.virtual_memory()
         ram_used  = vm.used  / 1024 ** 2
         ram_total = vm.total / 1024 ** 2
+    else:
+        # Fallback: read from /proc/meminfo
+        try:
+            mem = {}
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    k, v = line.split(":")
+                    mem[k.strip()] = int(v.split()[0])  # kB
+            ram_total = mem.get("MemTotal", 0) / 1024
+            ram_free  = mem.get("MemAvailable", 0) / 1024
+            ram_used  = ram_total - ram_free
+        except Exception:
+            pass
     if _PYNVML:
         util       = pynvml.nvmlDeviceGetUtilizationRates(_NVML_HANDLE)
         mem        = pynvml.nvmlDeviceGetMemoryInfo(_NVML_HANDLE)

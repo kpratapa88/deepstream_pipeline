@@ -1,0 +1,22 @@
+[property]
+gpu-id=0
+# CSRNet normalization
+net-scale-factor=0.0039215697906911373
+model-color-format=0
+onnx-file=../models/crowd_density.onnx
+model-engine-file=../models/crowd_density.engine
+batch-size=4
+network-mode=2 # FP16
+gie-unique-id=3
+process-mode=1 # Primary (runs on full frame)
+network-type=100 # Custom/Other
+# For crowd density, we need to handle the density map output
+# nvdspostprocess-lib-path=../postprocess/libnvdspostprocess_crowd.so
+# nvdspostprocess-config-file=config_postprocess_crowd.txt
+output-blob-names=output0
+# We'll parse this in the Python probe to get density score
+maintain-aspect-ratio=1
+interval=0
+# No clustering for density maps
+cluster-mode=4
+# This GIE will run in parallel with the detector/tracker in the pipeline

@@ -165,13 +165,16 @@ class KafkaEventProducer:
                       key=f"{cam_id}:{alert_type}")
 
     def publish_heartbeat(self, streams_active: int, fps_total: float,
-                          gpu_util_pct: float, vram_used_mb: float) -> None:
+                          gpu_util_pct: float, vram_used_mb: float,
+                          cpu_util_pct: float = 0.0, ram_used_mb: float = 0.0) -> None:
         """Publish periodic heartbeat to ds.heartbeat."""
         payload = {
             "streams_active": streams_active,
             "fps_total":      round(fps_total, 2),
-            "gpu_util_pct":   round(gpu_util_pct, 1) if gpu_util_pct is not None else None,
-            "vram_used_mb":   round(vram_used_mb, 1) if vram_used_mb is not None else None,
+            "gpu_util_pct":   round(gpu_util_pct, 1) if gpu_util_pct is not None else 0.0,
+            "vram_used_mb":   round(vram_used_mb, 1) if vram_used_mb is not None else 0.0,
+            "cpu_util_pct":   round(cpu_util_pct, 1) if cpu_util_pct is not None else 0.0,
+            "ram_used_mb":    round(ram_used_mb, 1)  if ram_used_mb  is not None else 0.0,
         }
         self._enqueue(TOPIC_HEARTBEAT, "heartbeat", payload, key=self.server_id)
 

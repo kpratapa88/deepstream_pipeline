@@ -18,7 +18,7 @@
                 "horse":    {"class_id": 17, "confidence_threshold": 0.3},
                 "sheep":    {"class_id": 18, "confidence_threshold": 0.3},
                 "cow":      {"class_id": 19, "confidence_threshold": 0.3},
-                "elephant": {"class_id": 20, "confidence_threshold": 0.3},
+                "elephant": {"class_id": 20, "confidence_threshold": 0.15},
                 "bear":     {"class_id": 21, "confidence_threshold": 0.3},
                 "zebra":    {"class_id": 22, "confidence_threshold": 0.3},
                 "giraffe":  {"class_id": 23, "confidence_threshold": 0.3}
@@ -38,6 +38,22 @@
             "engine":  "yolo11n-pose",
             "gie_id":  4,
             "classes": {}
+        },
+        "combined": {
+            "config":  "configs/config_infer_combined.txt",
+            "engine":  "combined",
+            "gie_id":  3,
+            "classes": {
+                "cat":   {"class_id": 0,  "confidence_threshold": 0.4},
+                "chicken":     {"class_id": 1,  "confidence_threshold": 0.3},
+                "cow":    {"class_id": 2,  "confidence_threshold": 0.3},
+                "dog":      {"class_id": 3, "confidence_threshold": 0.3},
+                "fire":    {"class_id": 4, "confidence_threshold": 0.3},
+                "horse":      {"class_id": 5, "confidence_threshold": 0.3},
+                "people":      {"class_id": 6, "confidence_threshold": 0.3},
+                "sheep":     {"class_id": 7, "confidence_threshold": 0.3},
+                "smoke":     {"class_id": 8, "confidence_threshold": 0.3}
+            }
         }
     },
 
@@ -62,7 +78,7 @@
             "models": [
                 {
                     "name":   "coco",
-                    "detect": ["cow", "horse", "sheep", "dog", "cat"]
+                    "detect": ["cow", "horse", "sheep", "dog", "cat", "elephant", "bear", "giraffe", "zebra"]
                 }
             ],
             "description": "Livestock monitoring — animal detection only"
@@ -74,7 +90,7 @@
             "models": [
                 {
                     "name":   "fire_smoke",
-                    "detect": ["fire", "smoke"]
+                    "detect": ["fire"]
                 }
             ],
             "description": "Industrial safety — fire and smoke detection only"
@@ -90,7 +106,7 @@
                     "features": ["crowd_density"]
                 }
             ],
-            "crowd": {"low": 3, "medium": 8, "high": 15, "critical": 25},
+            "crowd": {"critical": 4},
             "description": "Crowd management — person count and density zones"
         },
 
@@ -99,16 +115,11 @@
             "location": "Warehouse",
             "models": [
                 {
-                    "name":     "coco",
-                    "detect":   ["person"],
-                    "features": ["fall_detection"]
-                },
-                {
-                    "name":   "fire_smoke",
-                    "detect": ["fire", "smoke"]
+                    "name":   "coco",
+                    "detect": ["person"]
                 }
             ],
-            "description": "Warehouse safety — person fall detection AND fire/smoke simultaneously"
+            "description": "Checking Combined Model Accuracy"
         },
 
         "5": {
@@ -117,11 +128,7 @@
             "models": [
                 {
                     "name":   "coco",
-                    "detect": ["cow", "horse", "sheep", "elephant", "giraffe", "zebra", "bear"]
-                },
-                {
-                    "name":   "fire_smoke",
-                    "detect": ["fire"]
+                    "detect": ["person"]
                 }
             ],
             "description": "Farm perimeter — large animal detection AND fire alert"

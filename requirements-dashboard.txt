@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+confluent-kafka
+opencv-python-headless
+streamlit
+requests
+python-dotenv
+hypothesis
+pytest
+pytest-asyncio
+httpx
+pydantic-settings

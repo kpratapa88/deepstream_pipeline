@@ -1,0 +1,33 @@
+services:
+  deepstream-pipeline:
+    build: .
+    image: ds-yolo11-pipeline:latest
+    container_name: deepstream_yolo11
+    # runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video,graphics
+      - DISPLAY=${DISPLAY}
+      - GST_DEBUG=2
+      - WEBHOOK_URL=${WEBHOOK_URL:-http://localhost:5000/alert}
+      - STREAM_URI_1=${STREAM_URI_1:-/app/videos/sample1.mp4}
+      - STREAM_URI_2=${STREAM_URI_2:-/app/videos/sample2.mp4}
+      - STREAM_URI_3=${STREAM_URI_3:-/app/videos/sample3.mp4}
+      - STREAM_URI_4=${STREAM_URI_4:-/app/videos/sample4.mp4}
+    volumes:
+      - .:/app
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - ./models:/app/models
+      - ./output:/app/output
+    network_mode: host
+    privileged: true
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

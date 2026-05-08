@@ -24,10 +24,10 @@ class CrowdMonitor:
         self._zones   = defaultdict(str)   # {stream_id: last_zone}
 
     def update(self, stream_id: int, person_count: int,
-               thresholds: dict, dashboard, cam_id: str, location: str) -> str:
+               thresholds: dict, dashboard, cam_id: str, location: str):
         """
         Update rolling count, classify zone, emit event on zone change.
-        Returns current zone string.
+        Returns (zone, zone_changed).
         """
         self._counts[stream_id].append(person_count)
         avg = sum(self._counts[stream_id]) / len(self._counts[stream_id])
@@ -43,14 +43,15 @@ class CrowdMonitor:
         else:
             zone = "CLEAR"
 
-        if zone != self._zones[stream_id]:
+        zone_changed = zone != self._zones[stream_id]
+        if zone_changed:
             self._zones[stream_id] = zone
             dashboard.push_event(
                 "crowd", stream_id, cam_id, location,
                 f"zone={zone}  count={person_count}  avg={avg:.1f}"
             )
 
-        return zone
+        return zone, zone_changed
 
     def current_zone(self, stream_id: int) -> str:
         return self._zones.get(stream_id, "CLEAR")

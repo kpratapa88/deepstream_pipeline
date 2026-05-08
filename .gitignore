@@ -1,38 +1,69 @@
-# Model files — too large for git, build with setup.sh
-models/*.engine
-models/*.onnx
-models/*.pt
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
 
-# Output videos
-output/*.mp4
-output/*.avi
+# ── Virtual environments ──────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+.env.local
+.env.*.local
+
+# ── Secrets / environment ─────────────────────────────────────────────────────
+.env
+
+# ── Model weights & engines (large binary files) ─────────────────────────────
+*.pt
+*.pth
+*.onnx
+*.engine
+*.trt
+*.plan
+models/
+
+# ── Generated output (clips, recordings) ─────────────────────────────────────
+output/
+
+# ── Video files ───────────────────────────────────────────────────────────────
+videos/
 *.mp4
 *.avi
+*.mkv
+*.mov
 
-# Input videos
-videos/*.mp4
-videos/*.avi
-videos/*.mkv
-
-# Python cache
-__pycache__/
-*.pyc
-*.pyo
-
-# Virtual environment
-.venv/
-venv/
-env/
-
-# Temp nvinfer config files (generated at runtime)
+# ── Temporary pipeline config files ──────────────────────────────────────────
 configs/tmp*.txt
+configs/rules_launch.json
 
-# Unused submodule
+# ── Uploaded files ────────────────────────────────────────────────────────────
+videos/uploads/
+
+# ── DeepStream-Yolo submodule (external dependency) ──────────────────────────
 DeepStream-Yolo/
 
-# Empty unused directories
-postprocess/
-tests/
+# ── IDE / OS ──────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
 
-# Logs
+# ── Logs ─────────────────────────────────────────────────────────────────────
 *.log
+logs/
+
+# ── Streamlit ─────────────────────────────────────────────────────────────────
+.streamlit/secrets.toml

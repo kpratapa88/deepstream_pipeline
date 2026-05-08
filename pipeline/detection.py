@@ -103,8 +103,8 @@ def extract_tensor(frame_meta, gie_id: int, num_rows: int):
                 arr = np.ctypeslib.as_array(ptr, shape=(size,)).copy()
                 return arr.reshape(num_rows, 8400)
             l_user = l_user.next
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[extract_tensor] gie_id={gie_id} num_rows={num_rows} error: {e}")
     return None
 
 
@@ -143,8 +143,15 @@ def add_obj_meta(batch_meta, frame_meta, det: dict, stream_id: int,
 
     class_id   = det["class_id"]
     confidence = det["confidence"]
-    class_name = (FIRE_SMOKE_LABELS.get(class_id, f"class_{class_id}")
-                  if model_key == "fire_smoke" else label_fn(class_id))
+
+    # Resolve class name: prefer rule-engine label map injected into det,
+    # then fall back to model-specific logic, then label_fn (COCO labels.txt)
+    if "class_name" in det and det["class_name"]:
+        class_name = det["class_name"]
+    elif model_key == "fire_smoke":
+        class_name = FIRE_SMOKE_LABELS.get(class_id, f"class_{class_id}")
+    else:
+        class_name = label_fn(class_id)
 
     fall_detected  = det.get("fall_detected", False)
     fall_confirmed = det.get("fall_confirmed", False)
@@ -165,9 +172,20 @@ def add_obj_meta(batch_meta, frame_meta, det: dict, stream_id: int,
     # ── Border color ──────────────────────────────────────────────────────────
     if model_key == "fire_smoke":
         if class_id == 0:
-            obj_meta.rect_params.border_color.set(1.0, 0.4, 0.0, 1.0)  # orange
+            obj_meta.rect_params.border_color.set(1.0, 0.4, 0.0, 1.0)  # orange — fire
         else:
+            obj_meta.rect_params.border_color.set(0.7, 0.7, 0.7, 1.0)  # gray — smoke
+        label = f"{class_name} {confidence:.2f}"
+    elif model_key == "combined":
+        # fire=4, smoke=8 get warning colors; animals/people get cyan
+        if class_id == 4:   # fire
+            obj_meta.rect_params.border_color.set(1.0, 0.4, 0.0, 1.0)  # orange
+        elif class_id == 8: # smoke
             obj_meta.rect_params.border_color.set(0.7, 0.7, 0.7, 1.0)  # gray
+        elif class_id == 6: # people
+            obj_meta.rect_params.border_color.set(0.0, 1.0, 0.0, 1.0)  # green
+        else:               # animals
+            obj_meta.rect_params.border_color.set(0.0, 0.8, 1.0, 1.0)  # cyan
         label = f"{class_name} {confidence:.2f}"
     elif class_id == 0 and fall_active:
         if fall_confirmed:

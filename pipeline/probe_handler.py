@@ -11,6 +11,9 @@ from concurrent.futures import ThreadPoolExecutor
 from .constants import GIE_COCO, GIE_FIRE, GIE_POSE, FALL_WINDOW_SIZE, FALL_MIN_HITS
 from .detection import extract_tensor, extract_pose_tensor, parse_yolo_tensor, add_obj_meta
 from .fall_detector import FallDetector
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from .frame_publisher import FramePublisher
 
 
 class ProbeHandler:
@@ -21,16 +24,18 @@ class ProbeHandler:
 
     def __init__(self, rule_engine, label_fn, fall_detector: FallDetector,
                  crowd_monitor, event_emitter, dashboard,
-                 mux_w: int, mux_h: int, bm: dict):
-        self.rule_engine   = rule_engine
-        self.label_fn      = label_fn
-        self.fall_detector = fall_detector
-        self.crowd_monitor = crowd_monitor
-        self.event_emitter = event_emitter
-        self.dashboard     = dashboard
-        self.mux_w         = mux_w
-        self.mux_h         = mux_h
-        self._bm           = bm
+                 mux_w: int, mux_h: int, bm: dict,
+                 frame_publisher: "FramePublisher | None" = None):
+        self.rule_engine      = rule_engine
+        self.label_fn         = label_fn
+        self.fall_detector    = fall_detector
+        self.crowd_monitor    = crowd_monitor
+        self.event_emitter    = event_emitter
+        self.dashboard        = dashboard
+        self.mux_w            = mux_w
+        self.mux_h            = mux_h
+        self._bm              = bm
+        self._frame_publisher = frame_publisher
 
         # Per-stream detection cache: {(stream_id, model_name): [dets]}
         self._last_dets    = defaultdict(list)
@@ -38,6 +43,8 @@ class ProbeHandler:
         self._fall_windows = defaultdict(dict)
         # Frame counter for Kafka detection throttle
         self._frame_count  = defaultdict(int)
+        # Per-stream raw frame counter for snapshot publishing (every 30th frame)
+        self._snapshot_count: dict[int, int] = defaultdict(int)
 
         # Async executor for event emission (console + Kafka alerts)
         # 4 workers: enough headroom without competing with GStreamer threads
@@ -50,10 +57,12 @@ class ProbeHandler:
         """
         model_def = self.rule_engine.model_registry.get(model_name, {})
         gie_id    = model_def.get("gie_id", GIE_COCO)
-        # Use actual model output classes (num_detected_classes from nvinfer config)
-        # NOT the filtered subset in rules.json
-        _CLASS_COUNTS = {"coco": 80, "fire_smoke": 2, "pose": 51}
-        num_model_classes = _CLASS_COUNTS.get(model_name, 80)
+
+        # Always use the full tensor row count for the model, not just the
+        # subset of classes configured in rules.json. The tensor always contains
+        # all classes — we filter AFTER parsing via allowed_classes.
+        _FULL_CLASS_COUNTS = {"coco": 80, "fire_smoke": 2, "pose": 51, "combined": 9}
+        num_model_classes = _FULL_CLASS_COUNTS.get(model_name, 80)
 
         def probe(pad, info, u_data):
             import pyds
@@ -81,6 +90,8 @@ class ProbeHandler:
                     l_frame = l_frame.next
                     continue
 
+                # Count frames once per stream (not once per model per stream)
+                # Use a per-model counter key so each probe counts independently
                 self._bm[stream_id]["frames"] += 1
 
                 sub         = stream_cfg.get_subscription(model_name)
@@ -97,6 +108,17 @@ class ProbeHandler:
                     self._bm[stream_id]["infer_ms_total"] += infer_ms
                     self._bm[stream_id]["infer_calls"]    += 1
                     self._bm[stream_id]["detections"]     += len(dets)
+
+                    # Inject class names from rule engine so OSD shows correct
+                    # labels for any model (combined, fire_smoke, coco, etc.)
+                    model_reg   = self.rule_engine.model_registry.get(model_name, {})
+                    id_to_name  = {
+                        v["class_id"]: k
+                        for k, v in model_reg.get("classes", {}).items()
+                    }
+                    for d in dets:
+                        if d["class_id"] in id_to_name:
+                            d["class_name"] = id_to_name[d["class_id"]]
 
                     # ── Fall detection ────────────────────────────────────────
                     if model_name == "coco" and stream_cfg.has_feature("fall_detection"):

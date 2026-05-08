@@ -1,49 +1,7 @@
 # Kafka Integration — Step-by-Step Setup Guide
 
----
-
-## Why the Consumer Wasn't Receiving Messages (Root Cause)
-
-This is a classic Kafka advertised listener trap in WSL2 + Docker.
-
-Kafka has two addresses:
-1. The **bootstrap address** — what you connect to initially
-2. The **advertised address** — what Kafka tells your client to reconnect to for actual data
-
-The original config had `KAFKA_ADVERTISED_LISTENERS: PLAINTEXT_HOST://localhost:9092`.
-
-What happens:
-- DeepStream container connects to `localhost:9092` → bootstrap OK → Kafka says "reconnect to `localhost:9092`" → inside the container `localhost` = the container itself, not Kafka → **connection fails silently, messages never arrive**
-- WSL consumer connects to `localhost:9092` → bootstrap OK → Kafka says "reconnect to `localhost:9092`" → in WSL `localhost` = WSL host, not the Kafka container → **same silent failure**
-
-The fix is three separate listeners, each advertising the correct address for its access path:
-
-```
-INTERNAL      kafka:29092      → container-to-container (kafka-ui, etc.)
-LOCALHOST     localhost:9092   → WSL host processes (kafka_consumer.py)
-DOCKER_HOST   172.17.0.1:9093  → DeepStream container via Docker bridge IP
-```
-
-`172.17.0.1` is the Docker bridge gateway — always reachable from any container back to the host, and from the host to containers.
-
----
-
-## Network Map (WSL2 Setup)
-
-```
-WSL2 Host
-├── kafka_consumer.py          → localhost:9092  (LOCALHOST listener)
-│
-├── Docker Engine
-│   ├── ds-kafka container     ← listens on 0.0.0.0:9092, 9093, 29092
-│   ├── ds-zookeeper container
-│   ├── ds-kafka-ui container  → kafka:29092     (INTERNAL listener)
-│   │
-│   └── ds-pipeline container  → 172.17.0.1:9093 (DOCKER_HOST listener)
-│       (DeepStream)
-│
-└── Docker bridge: 172.17.0.1 (host-side gateway, reachable from all containers)
-```
+This guide covers everything from spinning up Kafka locally to running the
+pipeline with live event publishing and consuming events from another machine.
 
 ---
 
@@ -60,6 +18,8 @@ WSL2 Host
 
 ## Message Envelope (all topics)
 
+Every message shares this outer structure:
+
 ```json
 {
   "schema_version": "1.0",
@@ -74,68 +34,85 @@ WSL2 Host
 }
 ```
 
+### Alert payload (ds.alerts)
+
+```json
+{
+  "stream_id":  0,
+  "cam_id":     "CAM_01",
+  "location":   "Main_Entrance",
+  "alert_type": "fall",
+  "confidence": 0.87,
+  "details":    { "bbox": { "x1": 120, "y1": 80, "x2": 280, "y2": 420, "w": 160, "h": 340 } }
+}
+```
+
+### Detection payload (ds.detections)
+
+```json
+{
+  "stream_id":  2,
+  "cam_id":     "CAM_03",
+  "location":   "Factory_Floor",
+  "model":      "fire_smoke",
+  "class_name": "fire",
+  "confidence": 0.91,
+  "bbox":       { "x1": 400, "y1": 200, "x2": 560, "y2": 380, "w": 160, "h": 180 }
+}
+```
+
+### Heartbeat payload (ds.heartbeat)
+
+```json
+{
+  "streams_active": 4,
+  "fps_total":      112.4,
+  "gpu_util_pct":   79.1,
+  "vram_used_mb":   5120.0
+}
+```
+
 ---
 
-## Part 1 — Fix and Restart Kafka
+## Part 1 — Run Kafka Locally (Development / POC)
 
-### Step 1 — Confirm the Docker bridge IP is 172.17.0.1
-
-Run this in WSL:
+### Step 1 — Install Docker and Docker Compose
 
 ```bash
-ip route show | grep docker
-# Expected: 172.17.0.0/16 dev docker0
-# or
-docker network inspect bridge | grep Gateway
-# Expected: "Gateway": "172.17.0.1"
+# Ubuntu / Debian
+sudo apt-get install -y docker.io docker-compose-plugin
+sudo usermod -aG docker $USER
+newgrp docker
 ```
 
-If your gateway is different (e.g. `172.18.0.1`), update `DOCKER_HOST` in `docker-compose.kafka.yml` to match before continuing.
-
-### Step 2 — Tear down the old Kafka stack
-
-```bash
-docker compose -f docker-compose.kafka.yml down -v
-```
-
-The `-v` removes old volumes so Kafka starts clean with the new listener config.
-
-### Step 3 — Start the fixed stack
+### Step 2 — Start Kafka
 
 ```bash
 docker compose -f docker-compose.kafka.yml up -d
 ```
 
-Wait ~20 seconds, then verify all three containers are healthy:
+Wait ~15 seconds for Kafka to be healthy:
 
 ```bash
 docker compose -f docker-compose.kafka.yml ps
+# ds-kafka should show "healthy"
 ```
 
-Expected:
-```
-NAME            STATUS
-ds-zookeeper    Up (healthy)
-ds-kafka        Up (healthy)
-ds-kafka-ui     Up
-```
-
-### Step 4 — Verify all three listeners are active
+### Step 3 — Verify Kafka is reachable
 
 ```bash
 docker exec ds-kafka kafka-broker-api-versions --bootstrap-server localhost:9092
 ```
 
-Should return API version list without errors.
+You should see a list of API versions — Kafka is ready.
+
+### Step 4 — Install Python client
 
 ```bash
-# Also verify the bridge listener
-docker exec ds-kafka kafka-broker-api-versions --bootstrap-server 172.17.0.1:9093
+pip install confluent-kafka
 ```
 
-Both should succeed.
-
-### Step 5 — Create topics
+### Step 5 — Create topics (auto-created on first use, but explicit is better)
 
 ```bash
 python3 -c "
@@ -144,266 +121,282 @@ ensure_topics('localhost:9092')
 "
 ```
 
+Expected output:
+```
+[Kafka] created topic: ds.detections
+[Kafka] created topic: ds.alerts
+[Kafka] created topic: ds.heartbeat
+[Kafka] created topic: ds.benchmark
+```
+
 ---
 
-## Part 2 — Run the DeepStream Pipeline (Producer)
+## Part 2 — Test Without DeepStream (Simulator)
 
-The DeepStream container must use `172.17.0.1:9093` — the Docker bridge address — not `localhost`.
+Use this to verify Kafka is working before running the full GPU pipeline.
 
-### Step 6 — Start the pipeline with the correct broker address
+### Step 6 — Run the test event simulator
+
+```bash
+# Send random events from all 4 streams every 0.5s
+python3 kafka_test_producer.py --broker localhost:9092
+
+# Fast burst — 500 events then stop
+python3 kafka_test_producer.py --broker localhost:9092 --count 500 --interval 0
+```
+
+Sample output:
+```
+Kafka Test Producer
+  broker    : localhost:9092
+  server_id : server_1  gpu_id: 0
+  streams   : 4
+  interval  : 0.5s
+  count     : ∞
+
+[Kafka] created topic: ds.detections  (already exists)
+[Kafka] producer connected → localhost:9092 (server=server_1, gpu=0)
+  [     1] [CAM_01] detection  model=coco       class=person  conf=0.823
+  [     2] [CAM_03] ALERT      type=fire        conf=0.912
+  [     3] [CAM_04] detection  model=coco       class=person  conf=0.741
+  [     4] [CAM_02] detection  model=coco       class=cow     conf=0.654
+  [    10] heartbeat sent
+```
+
+### Step 7 — Open Kafka UI (optional)
+
+Open http://localhost:8080 in your browser.
+Navigate to Topics → ds.alerts to see messages in real time.
+
+---
+
+## Part 3 — Consume Events (Same Machine)
+
+### Step 8 — Run the consumer
+
+Open a second terminal:
+
+```bash
+# Consume all topics (detections are counted but not printed — too noisy)
+python3 kafka_consumer.py --broker localhost:9092
+
+# Alerts only
+python3 kafka_consumer.py --broker localhost:9092 --topics ds.alerts
+
+# Alerts + heartbeat
+python3 kafka_consumer.py --broker localhost:9092 --topics ds.alerts ds.heartbeat
+
+# Print every detection too (verbose)
+python3 kafka_consumer.py --broker localhost:9092 --verbose-detections
+
+# Save everything to a JSONL file
+python3 kafka_consumer.py --broker localhost:9092 --output-file events.jsonl
+```
+
+Sample consumer output:
+```
+Platform Consumer started
+  topics : ds.detections, ds.alerts, ds.heartbeat, ds.benchmark
+  Ctrl+C to stop
+
+🚨  ALERT  [CAM_01] Main_Entrance     type=fall   conf=0.870  server=server_1 gpu=0 ts=2026-04-13T10:22:01Z
+         details: {"bbox": {"x1": 120.0, "y1": 80.0, "x2": 280.0, "y2": 420.0}}
+🔥  ALERT  [CAM_03] Factory_Floor     type=fire   conf=0.912  server=server_1 gpu=0 ts=2026-04-13T10:22:04Z
+♥  heartbeat  server=server_1  gpu=0  streams=4  fps=112.4  gpu_util=79.1%  vram=5120.0 MB
+```
+
+---
+
+## Part 4 — Run the Full Pipeline with Kafka
+
+### Step 9 — Run the DeepStream pipeline with Kafka enabled
 
 ```bash
 # Inside the DeepStream container
+python3 main.py --streams 4 --kafka-broker localhost:9092
+
+# With server/GPU identity (important for multi-server deployments)
 python3 main.py --streams 4 \
-  --kafka-broker 172.17.0.1:9093 \
+  --kafka-broker localhost:9092 \
   --kafka-server-id server_1 \
   --kafka-gpu-id 0
 ```
 
-Or via environment variable (recommended):
-
-```bash
-docker run -it --rm \
-  --runtime=nvidia --gpus all \
-  -e KAFKA_BROKER=172.17.0.1:9093 \
-  -e SERVER_ID=server_1 \
-  -e GPU_ID=0 \
-  -v $(pwd):/app -w /app \
-  ds-pipeline:latest \
-  python3 main.py --streams 4
+You will see:
+```
+[Kafka] created topic: ds.detections  (already exists)
+[Kafka] producer connected → localhost:9092 (server=server_1, gpu=0)
+Starting pipeline — 4 streams
+  stream1 [CAM_01] Main_Entrance → coco(0) [fall_detection]
+  ...
 ```
 
-You should see:
-```
-[Kafka] producer connected → 172.17.0.1:9093 (server=server_1, gpu=0)
-```
-
-If you see `[Kafka] producer disabled` or a connection error, the bridge IP is wrong — re-check Step 1.
+Events now flow: DeepStream probe → EventEmitter → KafkaEventProducer → Kafka → Consumer.
 
 ---
 
-## Part 3 — Run the Consumer (WSL Host)
+## Part 5 — Consume from Another Server (Remote)
 
-The consumer runs directly in WSL (not in a container), so it uses `localhost:9092`.
+This is the production pattern: inference server publishes, platform server consumes.
 
-### Step 7 — Install the Python client in WSL
+### Step 10 — Expose Kafka to the network
+
+By default `docker-compose.kafka.yml` binds to `localhost:9092`.
+To allow remote connections, edit the compose file:
+
+```yaml
+# In docker-compose.kafka.yml, change KAFKA_ADVERTISED_LISTENERS:
+KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://<YOUR_SERVER_IP>:9092
+```
+
+Then restart:
 
 ```bash
+docker compose -f docker-compose.kafka.yml down
+docker compose -f docker-compose.kafka.yml up -d
+```
+
+Open port 9092 in your firewall:
+
+```bash
+# Ubuntu UFW
+sudo ufw allow 9092/tcp
+
+# GCP firewall rule
+gcloud compute firewall-rules create kafka-ingress \
+  --allow tcp:9092 \
+  --source-ranges 0.0.0.0/0 \
+  --description "Kafka broker"
+```
+
+### Step 11 — Run the consumer on the Platform Server
+
+On the Platform Server (different machine):
+
+```bash
+# Install client
 pip install confluent-kafka
+
+# Consume alerts from the inference server
+python3 kafka_consumer.py \
+  --broker <INFERENCE_SERVER_IP>:9092 \
+  --topics ds.alerts ds.heartbeat \
+  --group-id platform-server
+
+# Save all events to JSONL for downstream processing
+python3 kafka_consumer.py \
+  --broker <INFERENCE_SERVER_IP>:9092 \
+  --output-file /var/log/ds-events/alerts.jsonl
 ```
 
-### Step 8 — Run the consumer
+### Step 12 — Run the simulator from the Platform Server (remote test)
 
 ```bash
-# Alerts + heartbeat only (recommended starting point)
+python3 kafka_test_producer.py \
+  --broker <INFERENCE_SERVER_IP>:9092 \
+  --count 100
+```
+
+If you see events flowing, the network path is confirmed.
+
+---
+
+## Part 6 — Enterprise Setup (SASL/SSL Authentication)
+
+For production deployments where Kafka requires authentication.
+
+### Step 13 — Configure SASL_SSL on the broker
+
+Add to your Kafka broker config (or managed cluster settings):
+
+```properties
+listeners=SASL_SSL://0.0.0.0:9093
+advertised.listeners=SASL_SSL://<broker-host>:9093
+security.inter.broker.protocol=SASL_SSL
+sasl.mechanism.inter.broker.protocol=SCRAM-SHA-512
+sasl.enabled.mechanisms=SCRAM-SHA-512
+ssl.keystore.location=/etc/kafka/ssl/kafka.keystore.jks
+ssl.keystore.password=<keystore-password>
+ssl.truststore.location=/etc/kafka/ssl/kafka.truststore.jks
+ssl.truststore.password=<truststore-password>
+```
+
+### Step 14 — Run pipeline with SASL/SSL
+
+```bash
+python3 main.py --streams 4 \
+  --kafka-broker broker.internal:9093 \
+  --kafka-security-protocol SASL_SSL \
+  --kafka-sasl-mechanism SCRAM-SHA-512 \
+  --kafka-sasl-username ds-pipeline \
+  --kafka-sasl-password <password> \
+  --kafka-ssl-ca /etc/ssl/certs/ca-bundle.crt
+```
+
+Or via environment variables (recommended for containers):
+
+```bash
+export KAFKA_BROKER=broker.internal:9093
+export KAFKA_SASL_USERNAME=ds-pipeline
+export KAFKA_SASL_PASSWORD=<password>
+export KAFKA_SSL_CA=/etc/ssl/certs/ca-bundle.crt
+
+python3 main.py --streams 4 \
+  --kafka-security-protocol SASL_SSL \
+  --kafka-sasl-mechanism SCRAM-SHA-512
+```
+
+### Step 15 — Run consumer with SASL/SSL
+
+```bash
 python3 kafka_consumer.py \
-  --broker localhost:9092 \
+  --broker broker.internal:9093 \
+  --security-protocol SASL_SSL \
+  --sasl-mechanism SCRAM-SHA-512 \
+  --sasl-username platform-consumer \
+  --sasl-password <password> \
+  --ssl-ca /etc/ssl/certs/ca-bundle.crt \
   --topics ds.alerts ds.heartbeat
-
-# All topics (detections are counted but not printed — very noisy)
-python3 kafka_consumer.py --broker localhost:9092
-
-# Print every detection too
-python3 kafka_consumer.py --broker localhost:9092 --verbose-detections
-
-# Save everything to file
-python3 kafka_consumer.py \
-  --broker localhost:9092 \
-  --output-file events.jsonl
-```
-
-Expected output when the pipeline is running:
-```
-Platform Consumer started
-  topics : ds.alerts, ds.heartbeat
-  Ctrl+C to stop
-
-🚨  ALERT  [CAM_01] Main_Entrance     type=fall   conf=0.870  server=server_1 gpu=0
-🔥  ALERT  [CAM_03] Factory_Floor     type=fire   conf=0.912  server=server_1 gpu=0
-♥  heartbeat  server=server_1  gpu=0  streams=4  fps=112.4  gpu_util=79.1%
 ```
 
 ---
 
-## Part 4 — Test Without DeepStream (Simulator)
+## Part 7 — Multiple GPU Instances (Production)
 
-Use this to verify the full path is working before running the GPU pipeline.
-
-### Step 9 — Run the simulator from WSL (publishes via localhost:9092)
-
-```bash
-python3 kafka_test_producer.py --broker localhost:9092 --interval 0.5
-```
-
-In a second terminal, run the consumer:
+Each GPU runs its own pipeline container. All publish to the same Kafka cluster.
+The consumer on the Platform Server receives events from all GPUs in one stream.
 
 ```bash
-python3 kafka_consumer.py --broker localhost:9092 --topics ds.alerts ds.heartbeat
-```
-
-You should see alerts appearing in the consumer immediately.
-
-### Step 10 — Test the Docker bridge path (same path as DeepStream)
-
-```bash
-python3 kafka_test_producer.py --broker 172.17.0.1:9093 --count 20
-```
-
-Consumer should receive these too. This confirms the bridge listener works.
-
----
-
-## Part 5 — Diagnose If Still Not Working
-
-Run these checks in order.
-
-### Check 1 — Can WSL reach Kafka on localhost?
-
-```bash
-nc -zv localhost 9092
-# Expected: Connection to localhost 9092 port [tcp/*] succeeded!
-```
-
-### Check 2 — Can a container reach Kafka on the bridge?
-
-```bash
-docker run --rm alpine sh -c "apk add -q netcat-openbsd && nc -zv 172.17.0.1 9093"
-# Expected: 172.17.0.1 (172.17.0.1:9093) open
-```
-
-### Check 3 — Are messages actually in Kafka?
-
-```bash
-docker exec ds-kafka kafka-console-consumer \
-  --bootstrap-server localhost:9092 \
-  --topic ds.alerts \
-  --from-beginning \
-  --max-messages 5
-```
-
-If messages appear here but not in `kafka_consumer.py`, the issue is in the consumer code or group offset.
-
-### Check 4 — Reset consumer offset to read old messages
-
-By default the consumer starts at `latest` (only new messages). To read everything already in the topic:
-
-```bash
-python3 kafka_consumer.py \
-  --broker localhost:9092 \
-  --topics ds.alerts \
-  --group-id debug-$(date +%s)
-```
-
-Using a fresh `--group-id` forces offset reset to `latest` for a new group, but you can also patch the consumer temporarily:
-
-```python
-# In kafka_consumer.py, change:
-"auto.offset.reset": "earliest",   # read from beginning of topic
-```
-
-### Check 5 — Check Kafka logs for listener errors
-
-```bash
-docker logs ds-kafka 2>&1 | grep -i "advertised\|listener\|error" | tail -20
-```
-
-Look for lines like:
-```
-INFO [SocketServer] Created data-plane acceptor and processors for endpoint : LOCALHOST://0.0.0.0:9092
-INFO [SocketServer] Created data-plane acceptor and processors for endpoint : DOCKER_HOST://0.0.0.0:9093
-INFO [SocketServer] Created data-plane acceptor and processors for endpoint : INTERNAL://0.0.0.0:29092
-```
-
-All three should appear. If only one or two show up, the compose file wasn't applied — re-run Step 2 and Step 3.
-
-### Check 6 — Verify the advertised address the producer is getting
-
-Add this temporary debug snippet inside the DeepStream container:
-
-```python
-from confluent_kafka.admin import AdminClient
-a = AdminClient({"bootstrap.servers": "172.17.0.1:9093"})
-meta = a.list_topics(timeout=5)
-for broker in meta.brokers.values():
-    print(f"Broker {broker.id}: {broker.host}:{broker.port}")
-```
-
-The host should be `172.17.0.1`, not `localhost` or `kafka`. If it shows `localhost`, the `DOCKER_HOST` listener isn't being used — check the broker address passed to the pipeline.
-
----
-
-## Part 6 — Consume from a Separate Physical Machine
-
-### Step 11 — Find the WSL2 IP from Windows
-
-In PowerShell on Windows:
-
-```powershell
-wsl hostname -I
-# e.g. 172.28.144.5
-```
-
-### Step 12 — Add a fourth listener for external access
-
-Edit `docker-compose.kafka.yml` and add `EXTERNAL` listener:
-
-```yaml
-KAFKA_LISTENERS: >-
-  INTERNAL://0.0.0.0:29092,
-  LOCALHOST://0.0.0.0:9092,
-  DOCKER_HOST://0.0.0.0:9093,
-  EXTERNAL://0.0.0.0:9094
-
-KAFKA_ADVERTISED_LISTENERS: >-
-  INTERNAL://kafka:29092,
-  LOCALHOST://localhost:9092,
-  DOCKER_HOST://172.17.0.1:9093,
-  EXTERNAL://<WSL2_IP>:9094
-
-KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: >-
-  INTERNAL:PLAINTEXT,
-  LOCALHOST:PLAINTEXT,
-  DOCKER_HOST:PLAINTEXT,
-  EXTERNAL:PLAINTEXT
-```
-
-Add port mapping:
-```yaml
-ports:
-  - "9092:9092"
-  - "9093:9093"
-  - "9094:9094"
-```
-
-Restart the stack, then on the remote machine:
-
-```bash
-python3 kafka_consumer.py --broker <WSL2_IP>:9094 --topics ds.alerts
-```
-
----
-
-## Part 7 — Multiple GPU Instances
-
-Each GPU container uses the same `172.17.0.1:9093` broker address. The `server_id` and `gpu_id` in each message envelope distinguish which GPU sent what.
-
-```bash
-# GPU 0
+# GPU 0 — streams 1-10
 docker run -d --gpus '"device=0"' \
-  -e KAFKA_BROKER=172.17.0.1:9093 \
+  -e KAFKA_BROKER=<platform-ip>:9092 \
   -e SERVER_ID=server_1 -e GPU_ID=0 \
-  -v $(pwd):/app -w /app \
+  -e STREAM_URI_1=rtsp://<nvr>/cam01 ... \
   ds-pipeline:latest python3 main.py --streams 10
 
-# GPU 1
+# GPU 1 — streams 11-20
 docker run -d --gpus '"device=1"' \
-  -e KAFKA_BROKER=172.17.0.1:9093 \
+  -e KAFKA_BROKER=<platform-ip>:9092 \
   -e SERVER_ID=server_1 -e GPU_ID=1 \
-  -v $(pwd):/app -w /app \
+  -e STREAM_URI_1=rtsp://<nvr>/cam11 ... \
+  ds-pipeline:latest python3 main.py --streams 10
+
+# GPU 2 — streams 21-30
+docker run -d --gpus '"device=2"' \
+  -e KAFKA_BROKER=<platform-ip>:9092 \
+  -e SERVER_ID=server_1 -e GPU_ID=2 \
+  -e STREAM_URI_1=rtsp://<nvr>/cam21 ... \
+  ds-pipeline:latest python3 main.py --streams 10
+
+# GPU 3 — streams 31-40
+docker run -d --gpus '"device=3"' \
+  -e KAFKA_BROKER=<platform-ip>:9092 \
+  -e SERVER_ID=server_1 -e GPU_ID=3 \
+  -e STREAM_URI_1=rtsp://<nvr>/cam31 ... \
   ds-pipeline:latest python3 main.py --streams 10
 ```
 
-One consumer on the WSL host receives events from all GPUs:
+On the Platform Server, one consumer group handles all 40 streams:
 
 ```bash
 python3 kafka_consumer.py \
@@ -414,14 +407,58 @@ python3 kafka_consumer.py \
 
 ---
 
+## Troubleshooting
+
+**`confluent_kafka` not found**
+```bash
+pip install confluent-kafka
+```
+
+**`[Kafka] producer disabled (confluent_kafka not installed)`**
+The pipeline still runs — just without Kafka. Install the package and restart.
+
+**Connection refused on port 9092**
+```bash
+# Check Kafka is running
+docker compose -f docker-compose.kafka.yml ps
+
+# Check port is open
+nc -zv localhost 9092
+```
+
+**Remote connection refused**
+- Ensure `KAFKA_ADVERTISED_LISTENERS` uses the server's actual IP, not `localhost`
+- Check firewall allows port 9092 from the consumer's IP
+
+**Messages not appearing in consumer**
+```bash
+# Check topic has messages
+docker exec ds-kafka kafka-console-consumer \
+  --bootstrap-server localhost:9092 \
+  --topic ds.alerts \
+  --from-beginning \
+  --max-messages 5
+```
+
+**Consumer lag building up**
+- Add more partitions: `num_partitions=8` in `ensure_topics()`
+- Run multiple consumer instances with the same `--group-id`
+
+**`[Kafka] queue full — dropped N messages`**
+The background thread can't keep up. Options:
+- Increase `linger.ms` and `batch.size` in `KafkaEventProducer`
+- Reduce detection publish rate (only publish alerts, not all detections)
+- Use a faster network path to the broker
+
+---
+
 ## Environment Variables Reference
 
-| Variable | Used by | Value |
-|----------|---------|-------|
-| `KAFKA_BROKER` | DeepStream container | `172.17.0.1:9093` |
-| `KAFKA_BROKER` | WSL host consumer/simulator | `localhost:9092` |
-| `SERVER_ID` | Pipeline container | `server_1` |
-| `GPU_ID` | Pipeline container | `0`, `1`, `2`, `3` |
-| `KAFKA_SASL_USERNAME` | Both | SASL username if auth enabled |
-| `KAFKA_SASL_PASSWORD` | Both | SASL password if auth enabled |
-| `KAFKA_SSL_CA` | Both | CA cert path if TLS enabled |
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `KAFKA_BROKER` | Broker address used by `--kafka-broker` default | `""` (disabled) |
+| `SERVER_ID` | Server identifier in message envelope | `server_1` |
+| `GPU_ID` | GPU index in message envelope | `0` |
+| `KAFKA_SASL_USERNAME` | SASL username | `""` |
+| `KAFKA_SASL_PASSWORD` | SASL password | `""` |
+| `KAFKA_SSL_CA` | Path to CA certificate | `""` |

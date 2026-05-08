@@ -1,0 +1,32 @@
+[property]
+gpu-id=0
+net-scale-factor=0.0039215697906911373
+model-color-format=0
+onnx-file=../models/yolo11n.onnx
+model-engine-file=../models/yolo11n.engine
+batch-size=4
+infer-dims=3;640;640
+network-mode=2 # FP16
+force-implicit-batch-dim=0
+num-detected-classes=80
+interval=0
+gie-unique-id=1
+process-mode=1 # Primary
+network-type=0 # Detector
+labelfile-path=../labels.txt
+# Custom plugin for YOLOv11 parsing
+parse-bbox-func-name=NvDsInferParseYolo
+custom-lib-path=../DeepStream-Yolo/nvdsinfer_custom_impl_Yolo/libnvdsinfer_custom_impl_Yolo.so
+
+# No clustering (NMS handled by plugin)
+cluster-mode=2 # NMS
+maintain-aspect-ratio=1
+symmetric-padding=1
+
+[class-attrs-all]
+pre-cluster-threshold=0.25
+nms-iou-threshold=0.45
+topk=300
+
+# Filter out classes except person (0) and animals (14-23)
+filter-out-class-ids=1;2;3;4;5;6;7;8;9;10;11;12;13;24;25;26;27;28;29;30;31;32;33;34;35;36;37;38;39;40;41;42;43;44;45;46;47;48;49;50;51;52;53;54;55;56;57;58;59;60;61;62;63;64;65;66;67;68;69;70;71;72;73;74;75;76;77;78;79
